@@ -1,0 +1,14 @@
+# 参考环境：Python 3.8.20；PyTorch / torchvision 使用 CUDA 12.1 构建。
+# 此文件记录运行所用核心版本及部分间接依赖，不是完整环境锁文件。
+torch==2.3.1
+torchvision==0.18.1
+timm==0.6.12
+numpy==1.24.3
+PyYAML==6.0
+Pillow==9.5.0
+huggingface-hub==0.36.2
+packaging==24.2
+tqdm==4.65.0
+
+# 可选：加载 .safetensors 权重时，另行安装 safetensors==0.4.3。
+# 该可选版本不在上述运行环境中，不属于本次 .pth 流程验证范围。

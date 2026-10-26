@@ -1,0 +1,374 @@
+﻿# DevDNA ViT config (fully annotated)
+#
+# Load this file directly:
+#   py -3 run_devdna_vit.py --config config.yaml
+#
+# Priority rule:
+#   CLI flags > values in this YAML.
+#   Example: --mode eval will override mode: analyze_sensitivity below.
+#
+# ---------------------------
+# Global runtime options
+# ---------------------------
+
+# Run mode. Allowed values:
+#   compress           -> only build archive
+#   eval               -> only decode+evaluate (if archive exists)
+#   compress_eval      -> compress then decode+evaluate
+#   inspect            -> print archive manifest
+#   analyze_sensitivity-> block-level attn/mlp sensitivity experiment
+#   eval_pretrained    -> evaluate dense pretrained model directly (no codec)
+#   eval_streaming_runtime_familywise -> archive-invariant family-wise streaming runtime experiment
+mode: analyze_sensitivity
+
+# Global random seed (int >= 0).
+seed: 42
+
+# CUDA device visibility (string, same as CUDA_VISIBLE_DEVICES).
+# Examples: "0", "1", "0,1".
+cuda_devices: "0"
+
+# Torch device text.
+# Common values: "cuda", "cpu", "cuda:0".
+device: cuda
+
+# AMP dtype for normal evaluation path (not used in sensitivity eval).
+# Allowed: fp16, bf16
+amp_dtype: fp16
+
+# Progress print interval (steps). 0 means no periodic print.
+print_freq: 20
+
+# ---------------------------
+# Model loading
+# ---------------------------
+model:
+  # timm model name.
+  # Examples: vit_base_patch16_224, vit_large_patch16_224
+  name: swin_small_patch4_window7_224
+
+  # If true, current code requires a local offline weight path.
+  # (No online timm pretrained download path is used.)
+  pretrained: true
+
+  # Local pretrained file path.
+  # Supported: .safetensors, .pt, .pth, .bin (anything torch.load can read)
+  # For .safetensors, package `safetensors` is required.
+  pretrained_weight_path: "/cephfs/shared/cc/projects/mmdetection/work_dirs/devdna_exports/mask_rcnn_swin_s_backbone_timm.pth"
+
+  # Optional local checkpoint path.
+  # If non-empty, this path takes priority over pretrained_weight_path.
+  checkpoint: ""
+
+# ---------------------------
+# Dataset / loader
+# ---------------------------
+data:
+  # ImageNet root folder.
+  # Expected structure example:
+  #   data_root/train/<class_name>/*.JPEG
+  #   data_root/val/<class_name>/*.JPEG
+  data_root: "/cephfs/shared/cc/datasets"
+
+  # Dataset split. Usually: val
+  split: val
+
+  # Optional class map file path. Keep empty if not needed.
+  class_map: ""
+
+  # Dataloader batch size (int > 0).
+  batch_size: 128
+
+  # Number of dataloader worker processes.
+  workers: 8
+
+  # pin_memory for DataLoader.
+  pin_memory: true
+
+  # Disable timm prefetcher if true.
+  no_prefetcher: false
+
+  # Override crop pct (float) or null to use model default.
+  # Typical values: 0.875, 1.0
+  crop_pct: null
+
+  # Override interpolation string or empty string for default.
+  # Common values: bicubic, bilinear, nearest
+  interpolation: ""
+
+# ---------------------------
+# Global scope switch (compression/sensitivity only)
+# ---------------------------
+scope:
+  # If true, include classifier linear layers (head/head_dist when present)
+  # in compression + sensitivity analysis.
+  # This switch does NOT control activation quantization scope.
+  include_head_linear: false
+
+# ---------------------------
+# Evaluation-time activation fake quantization
+# ---------------------------
+eval:
+  activation_quant:
+    # Enable activation fake quant for eval path.
+    enabled: true
+
+    # Quantization setup.
+    bit: 4
+    scheme: asymmetric   # symmetric | asymmetric
+    eps: 1.0e-8
+
+    observer:
+      # minmax | percentile
+      type: percentile
+      percentile: 0.99975
+      max_samples: 262144
+      samples_per_update: 8192
+
+    scope:
+      linear_inputs: true
+      matmul_qk_inputs: true
+      matmul_av_inputs: true
+      include_head_linear_input: false
+      skip_layernorm_outputs: true
+
+    calibration:
+      # Pick calibration subset from data_root/{train|val}
+      source: train   # train | val
+      num_images: 128
+      seed: 3
+      batch_size: 256
+      num_workers: 4
+      pin_memory: true
+      persistent_workers: true
+
+# ---------------------------
+# Compression / gauge options
+# ---------------------------
+compression:
+  # Keep ratio for MLP families in archive compression mode.
+  # Range: [0, 1]. Higher -> better quality, larger archive.
+  mlp_keep_ratio: 0.96
+
+  # Keep ratio for attention families in archive compression mode.
+  # Range: [0, 1].
+  attn_keep_ratio: 0.96
+
+  # Quantization bits used by codec.
+  # Valid range from codec: [2, 16]. Recommended: 12.
+  quant_bits: 12
+
+  # Gauge descriptor projection dim (int > 0).
+  gauge_proj_dim: 16
+
+  # Gauge PCA dim (int > 0).
+  gauge_pca_dim: 8
+
+  # Power-iteration count for spectral norm estimation.
+  # Higher -> more stable estimate, more compute.
+  sensitivity_power_iters: 16
+
+  # If true, disables attention rotation gauge step.
+  # Set true for some non-standard ViT variants if needed.
+  disable_attn_rotation_gauge: false
+
+  # If true, skips exact gauge verification checks (faster, less safety).
+  disable_gauge_verify: false
+
+  # Codec allocation mode:
+  #   legacy_global         -> old family-stack fixed keep-ratio path
+  #   blockwise_thresholded -> new block-wise adaptive threshold path
+  codec_allocation_mode: blockwise_thresholded
+
+  # -------- Blockwise adaptive codec knobs (used when codec_allocation_mode=blockwise_thresholded) --------
+  # Sensitivity JSON path from mode=analyze_sensitivity.
+  sensitivity_report: outputs/sensitivity_report.json
+
+  # Target archive size in MB (real encoded zip size target).
+  # Must be > 0 in blockwise_thresholded mode.
+  target_archive_mb: 33.6975
+  # Acceptable relative target-size error for lambda search.
+  # Example 0.005 means 0.5% tolerance.
+  target_archive_tolerance_ratio: 0.0001
+
+  # Maximum binary-search iterations for lambda.
+  # Larger -> potentially closer to target size, but slower.
+  target_archive_max_iters: 40
+
+  # Initial lambda for "probe upper bound then bisect".
+  # This is the first probe value before repeated lambda *= 2.
+  lambda_probe_start: 1.0e-2
+
+  # Sensitivity fusion weights:
+  #   Sens(u) = w_ce*R_ce + w_logit*R_logit + w_byte*R_byte
+  sens_weight_ce: 0
+  sens_weight_logit: 0.45
+  sens_weight_byte: 0.55
+
+  # Importance exponent alpha in score:
+  #   Importance(t,j) = (|c_t,j| / (Q_q + eps))^alpha
+  alpha: 2
+
+  # Importance quantile q in score:
+  #   Q_q = quantile(|c_t,j|, q), with q in (0, 1].
+  q: 0.95
+
+  # Sensitivity linear coefficient beta in score:
+  #   Score(t,j) = (1 + beta * Sens(u(t))) * Imp(t,j)
+  sens_beta: 1.9
+
+  # Per-tensor minimum keep ratio floor to avoid near-all-zero tensors.
+  min_tensor_keep_ratio: 0
+
+# ---------------------------
+# Sensitivity experiment options
+# (used in mode: analyze_sensitivity)
+# ---------------------------
+sensitivity:
+  # Number of calibration samples (int > 0).
+  # Must be <= available samples in chosen split.
+  calib_size: 8192
+
+  # Fixed keep ratio for both attn bundle and mlp bundle.
+  # Range: [0, 1].
+  keep_ratio: 0.75
+
+  # Fixed quant bits for sensitivity local codec.
+  # Valid: [2, 16].
+  quant_bits: 8
+
+  # Bundle-internal budget allocation strategy.
+  # Allowed:
+  #   equal_keep_ratio      -> each tensor keeps same ratio of its own coefficients
+  #   sensitivity_weighted  -> split shared bundle budget by sensitivity proxy
+  allocation: equal_keep_ratio
+
+  # Output path for pure sensitivity JSON.
+  output: outputs/sensitivity_report.json
+
+  # Flat CSV table output path (one row per block+bundle).
+  csv_output: outputs/sensitivity_table.csv
+
+# ---------------------------
+# Progressive decode options
+# ---------------------------
+decode:
+  # Fraction of bitplanes to decode.
+  # >= 1.0 means full decode.
+  # <= 0 means decode 1 plane (fallback behavior).
+  fraction: 1.0
+
+  # Explicit number of planes to decode.
+  # > 0 overrides decode.fraction.
+  # <= 0 means disabled.
+  planes: -1
+
+# ---------------------------
+# Family-wise streaming runtime
+# (used in mode: eval_streaming_runtime_familywise)
+# ---------------------------
+streaming_runtime:
+  enabled: true
+  archive_invariant: true
+
+  mode: familywise_runtime
+  logical_scheduler_unit: block_attn_mlp
+  # New runtime grouping policy:
+  #   auto            -> profile a few batches, then auto choose group granularity
+  #   block_attn_mlp  -> finest granularity (block_i.attn + block_i.mlp)
+  #   block_full      -> one group per block (attn+mlp together)
+  #   super_block     -> merge K consecutive blocks into one group
+  group_policy: block_attn_mlp
+  # Used only when group_policy=super_block (and as candidate granularity under auto).
+  super_block_k: 3
+  # Number of profiling batches for auto policy selection.
+  auto_profile_batches: 1
+  # Auto policy target: choose finest policy with compute/decode ratio >= target.
+  auto_compute_decode_ratio_target: 1.15
+  # Reuse decoded CPU tensors across batches.
+  cache_decoded_groups: true
+  primitive_unit: tensor_or_family_entry
+
+  modes:
+    - serial_full_decode
+    - lazy_family_decode
+    - lazy_family_decode_overlap
+    - oracle_ready_to_run
+
+  eval_batch_size: 128
+  eval_samples: 1024
+  warmup_batches: 5
+  repeats: 3
+  # If true, clear decoded CPU cache after warmup and before timed evaluation.
+  # Recommended true for "cold-start-from-archive" style latency accounting.
+  reset_decoded_cache_before_timed_eval: true
+  # If true, when repeats>=2, aggregation drops repeat_index=0 to reduce first-run initialization outliers.
+  drop_first_repeat_for_aggregation: true
+
+  overlap:
+    enabled: true
+    double_buffering: true
+    prefetch_next_group: true
+
+  memory:
+    track_peak_gpu_mem: true
+    track_peak_decode_load_gpu_mem: true
+    track_peak_model_resident_gpu_mem: true
+
+  outputs:
+    result_json: outputs/streaming_runtime_familywise_results.json
+    result_csv: outputs/streaming_runtime_familywise_results.csv
+
+# ---------------------------
+# Output paths
+# ---------------------------
+paths:
+  # Archive zip output/input path.
+  archive_path: outputs/gaugedna_vit.zip
+
+  # Generic report output path.
+  # In analyze_sensitivity mode, this can store the same JSON as sensitivity.output.
+  save_report: outputs/gaugedna_report.json
+
+  # Optional decoded dense state_dict save path.
+  # Empty string disables save.
+  save_decoded_checkpoint: ""
+
+  # Optional allocation JSON output (blockwise_thresholded only).
+  allocation_report_output: outputs/allocation_report.json
+
+  # Optional allocation CSV output (blockwise_thresholded only).
+  allocation_csv_output: outputs/allocation_table.csv
+
+# ---------------------------
+# Practical examples
+# ---------------------------
+# Activation-quant switch rule:
+# For modes that include evaluation stage (eval / eval_pretrained / compress_eval),
+# whether activation quantization is used is controlled by `eval.activation_quant.enabled`.
+#   - true  -> run activation calibration + activation fake-quant evaluation
+#   - false -> run normal evaluation (no activation fake-quant)
+# Modes without evaluation stage (compress / inspect / analyze_sensitivity) are not affected.
+#
+# 1) Sensitivity experiment:
+#    python3 run_devdna_vit.py --config config.yaml --mode analyze_sensitivity
+#
+# 2) Compress + decode + evaluate:
+#    (evaluation stage follows `eval.activation_quant.enabled`)
+#    python3  run_devdna_vit.py --config config.yaml --mode compress_eval
+#
+# 3) Direct pretrained eval with official-like timm preprocess:
+#    (evaluation stage follows `eval.activation_quant.enabled`)
+#    python3 run_devdna_vit.py --config config.yaml --mode eval_pretrained
+#
+# 4) Override specific fields from CLI:
+#    (evaluation stage follows `eval.activation_quant.enabled` unless CLI override is used)
+#    python3 run_devdna_vit.py --config config.yaml --mode eval --decode-planes 4
+#
+# 5) Blockwise adaptive codec run (MB budget):
+#    (evaluation stage follows `eval.activation_quant.enabled`)
+#    python3 run_devdna_vit.py --config config.yaml --mode compress_eval --codec-allocation-mode blockwise_thresholded
+#
+# 6) Force activation quant ON/OFF from CLI (temporary override without editing YAML):
+#    ON : python3 run_devdna_vit.py --config config.yaml --mode eval --activation-quant-enabled
+#    OFF: python3 run_devdna_vit.py --config config.yaml --mode eval --activation-quant-disabled
